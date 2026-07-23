@@ -51,7 +51,9 @@ TaskHandle_t fuzzyHandle;
 TaskHandle_t irrigationHandle[5];
 TaskHandle_t webHandle;
 TaskHandle_t manualControlHandle;
+TaskHandle_t scheduleHandle;
 SemaphoreHandle_t zonaMutex;
+SemaphoreHandle_t maxConcurrentIrrigationSemaphore;
 
 // ==========================================
 // VARIABLE
@@ -73,10 +75,19 @@ float lightLevel;
 volatile int activeIrrigations = 0;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Variabel untuk mode manual
-bool isManualOverride = false;
+// 0 = Auto, 1 = Manual, 2 = Schedule
+int systemMode = 0; 
 bool manualRelayMain = false;
 bool manualRelayState[5] = {false};
+
+struct Schedule {
+    bool active;
+    uint8_t hour;
+    uint8_t minute;
+    uint32_t duration;
+};
+Schedule zoneSchedules[5];
+int lastScheduledMinute = -1;
 
 // ==========================================
 // CONFIGURATIONS (WEB)
@@ -87,6 +98,7 @@ uint32_t cfgManualDur      = 10;   // detik (durasi timer manual)
 
 // Timer untuk manual mode
 uint32_t manualTimerOff[5] = {0};
+uint32_t manualStartTime[5] = {0};
 
 void updateMainRelayState() {
     bool anyOn = false;
@@ -112,6 +124,7 @@ struct LogEntry {
     float soil[5];
     int mode[5];
     float duration[5];
+    int sysMode;
 };
 #define MAX_LOG_ENTRIES 100
 LogEntry logBuffer[MAX_LOG_ENTRIES];
@@ -129,6 +142,7 @@ void addLogEntry() {
         logBuffer[logHead].mode[i] = zona[i].mode;
         logBuffer[logHead].duration[i] = zona[i].duration;
     }
+    logBuffer[logHead].sysMode = systemMode;
     logHead = (logHead + 1) % MAX_LOG_ENTRIES;
     if (logCount < MAX_LOG_ENTRIES) logCount++;
 }
@@ -166,8 +180,8 @@ float fungsiMax(float a, float b)
 // ==========================================
 float f_Kering(float x)
 {
-    if (x <= 30) return 1.0;
-    if (x > 30 && x < 50) return (50.0 - x) / (50.0 - 30.0);
+    if (x <= 10) return 1.0;
+    if (x > 0 && x < 50) return (50.0 - x) / (50.0 - 30.0);
     return 0.0;
 }
 
@@ -181,8 +195,8 @@ float f_Lembab(float x)
 
 float f_Basah(float x)
 {
-    if (x <= 60) return 0.0;
-    if (x > 60 && x < 80) return (x - 60.0) / (80.0 - 60.0);
+    if (x <= 33.82 ) return 0.0;
+    if (x > 33.82 && x < 40) return (x - 33.82) / (40.0 - 33.82);
     return 1.0;
 }
 
@@ -217,18 +231,20 @@ float f_Panas(float x)
 float f_Redup(float x)
 {
     if (x <= 5000) return 1.0;
-    if (x > 5000 && x < 20000) return (20000.0 - x) / (20000.0 - 5000.0);
+    if (x > 5000 && x < 25000) return (25000.0 - x) / (25000.0 - 5000.0);
     return 0.0;
 }
 
+// Himpunan Sedang: Segitiga (Transisi antara Redup & Terang)
 float f_Sedang(float x)
 {
-    if (x <= 15000 || x >= 50000) return 0.0;
-    if (x > 15000 && x <= 32500) return (x - 15000.0) / (32500.0 - 15000.0);
-    if (x > 32500 && x < 50000) return (50000.0 - x) / (50000.0 - 32500.0);
+    if (x <= 5000 || x >= 65000) return 0.0;
+    if (x > 5000 && x <= 35000) return (x - 5000.0) / (35000.0 - 5000.0);
+    if (x > 35000 && x < 65000) return (65000.0 - x) / (65000.0 - 35000.0);
     return 0.0;
 }
 
+// Himpunan Terang: Trapesium kanan
 float f_Terang(float x)
 {
     if (x <= 45000) return 0.0;
@@ -384,7 +400,7 @@ void handleData() {
     doc["temperature"] = temperature;
     doc["humidity"] = humidity;
     doc["lightLevel"] = lightLevel;
-    doc["isManualOverride"] = isManualOverride;
+    doc["systemMode"] = systemMode;
     doc["relayMain"] = manualRelayMain;
 
     JsonArray arr = doc["zona"].to<JsonArray>();
@@ -405,9 +421,10 @@ void handleData() {
     server.send(200, "application/json", response);
 }
 
+//handle untuk mengubah mode system biar tidak tabrakan sama handle relay dan fuzzy
 void handleOverride() {
-    if (server.hasArg("state")) {
-        isManualOverride = (server.arg("state") == "1");
+    if (server.hasArg("mode")) {
+        systemMode = server.arg("mode").toInt();
 
         // Reset all relays when toggling manual mode to prevent stuck relays
         manualRelayMain = false;
@@ -424,7 +441,7 @@ void handleOverride() {
 }
 
 void handleRelay() {
-    if (isManualOverride && server.hasArg("relay")) {
+    if (systemMode == 1 && server.hasArg("relay")) {
         String relay = server.arg("relay");
         bool isTimer = (cfgManualMode == 1);
         uint32_t durMs = cfgManualDur * 1000;
@@ -436,9 +453,36 @@ void handleRelay() {
         } else {
             int idx = relay.toInt();
             if (idx >= 0 && idx < 5) {
-                manualRelayState[idx] = !manualRelayState[idx];
-                if (isTimer && manualRelayState[idx]) manualTimerOff[idx] = millis() + durMs;
-                digitalWrite(relayPin[idx], manualRelayState[idx] ? RELAY_ON : RELAY_OFF);
+                if (!manualRelayState[idx]) {
+                    // Cek maksimal 3 sub aktif
+                    int activeCount = 0;
+                    for (int i = 0; i < 5; i++) {
+                        if (manualRelayState[i]) activeCount++;
+                    }
+                    if (activeCount >= 3) {
+                        server.send(400, "text/plain", "MAKSIMAL 3 ZONA AKTIF | GAKUAT AKI NYA");
+                        return;
+                    }
+                    
+                    // Turn ON
+                    manualRelayState[idx] = true;
+                    manualStartTime[idx] = millis();
+                    if (isTimer) {
+                        manualTimerOff[idx] = millis() + durMs;
+                        zona[idx].duration = cfgManualDur;
+                    }
+                    digitalWrite(relayPin[idx], RELAY_ON);
+                } else {
+                    // Turn OFF
+                    manualRelayState[idx] = false;
+                    digitalWrite(relayPin[idx], RELAY_OFF);
+                    manualTimerOff[idx] = 0;
+                    
+                    // Log final duration
+                    zona[idx].duration = (millis() - manualStartTime[idx]) / 1000.0;
+                    addLogEntry();
+                    zona[idx].duration = 0;
+                }
                 updateMainRelayState();
             }
         }
@@ -472,6 +516,81 @@ void handleConfigPost() {
     server.send(400, "text/plain", "Bad Request");
 }
 
+void saveSchedule() {
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (int i = 0; i < 5; i++) {
+        JsonObject z = arr.add<JsonObject>();
+        z["active"] = zoneSchedules[i].active;
+        z["hour"] = zoneSchedules[i].hour;
+        z["minute"] = zoneSchedules[i].minute;
+        z["duration"] = zoneSchedules[i].duration;
+    }
+    File file = SPIFFS.open("/schedule.json", "w");
+    if (file) {
+        serializeJson(doc, file);
+        file.close();
+    }
+}
+
+void loadSchedule() {
+    if (SPIFFS.exists("/schedule.json")) {
+        File file = SPIFFS.open("/schedule.json", "r");
+        if (file) {
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, file);
+            if (!error) {
+                JsonArray arr = doc.as<JsonArray>();
+                for (int i = 0; i < 5 && i < arr.size(); i++) {
+                    JsonObject z = arr[i];
+                    zoneSchedules[i].active = z["active"] | false;
+                    zoneSchedules[i].hour = z["hour"] | 0;
+                    zoneSchedules[i].minute = z["minute"] | 0;
+                    zoneSchedules[i].duration = z["duration"] | 10;
+                }
+            }
+            file.close();
+        }
+    }
+}
+
+void handleScheduleGet() {
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (int i = 0; i < 5; i++) {
+        JsonObject z = arr.add<JsonObject>();
+        z["id"] = i + 1;
+        z["active"] = zoneSchedules[i].active;
+        z["hour"] = zoneSchedules[i].hour;
+        z["minute"] = zoneSchedules[i].minute;
+        z["duration"] = zoneSchedules[i].duration;
+    }
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleSchedulePost() {
+    if (server.hasArg("plain")) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, server.arg("plain"));
+        if (!error && doc.is<JsonArray>()) {
+            JsonArray arr = doc.as<JsonArray>();
+            for (int i = 0; i < 5 && i < arr.size(); i++) {
+                JsonObject z = arr[i];
+                zoneSchedules[i].active = z["active"] | false;
+                zoneSchedules[i].hour = z["hour"] | 0;
+                zoneSchedules[i].minute = z["minute"] | 0;
+                zoneSchedules[i].duration = z["duration"] | 10;
+            }
+            saveSchedule();
+            server.send(200, "text/plain", "OK");
+            return;
+        }
+    }
+    server.send(400, "text/plain", "Bad Request");
+}
+
 void handleLogGet() {
     JsonDocument doc;
     JsonArray arr = doc.to<JsonArray>();
@@ -493,6 +612,7 @@ void handleLogGet() {
             mArr.add(logBuffer[idx].mode[j]);
             dArr.add(logBuffer[idx].duration[j]);
         }
+        obj["sysMode"] = logBuffer[idx].sysMode;
     }
 
     String response;
@@ -512,10 +632,15 @@ void SensorTask(void *pv)
     while (1)
     {
         if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-            for(int i=0; i<5; i++) {
+           
+ for(int i=0; i<5; i++) {
                 int adc = analogRead(soilPin[i]);
-                float sVal = map(adc, 2662, 1269, 0, 100);
-                zona[i].soil = constrain(sVal, 0.0f, 100.0f);
+                float a = 41.7453982;
+                float b = -0.012665492;
+                //persamaan regresi linier untuk mapping ADC ke kelembaban tanah
+                float Y = a + (b * adc);
+                Y = constrain(Y, 0.0f, 100.0f);
+                zona[i].soil = Y;
             }
             xSemaphoreGive(zonaMutex);
         }
@@ -529,7 +654,9 @@ void SensorTask(void *pv)
         if (isnan(humidity))
             humidity = 00.0;
 
-        if (!isManualOverride && activeIrrigations == 0) {
+        addLogEntry();
+
+        if (systemMode == 0 && activeIrrigations == 0) {
             xTaskNotifyGive(fuzzyHandle);
         }
 
@@ -547,8 +674,8 @@ void FuzzyTask(void *pv)
     {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        if (isManualOverride) {
-            continue; // Skip automatic control if manual is active
+        if (systemMode != 0) {
+            continue; // Skip fuzzy control if not in Auto mode
         }
 
         if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -567,8 +694,6 @@ void FuzzyTask(void *pv)
             }
             xSemaphoreGive(zonaMutex);
         }
-
-        addLogEntry();
     }
 }
 
@@ -584,9 +709,12 @@ void IrrigationTask(void *pv)
     {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        if (isManualOverride) {
+        if (systemMode == 1) {
             continue;
         }
+
+        // Tunggu giliran jika sudah ada 3 sub yang aktif
+        xSemaphoreTake(maxConcurrentIrrigationSemaphore, portMAX_DELAY);
 
         portENTER_CRITICAL(&mux);
         activeIrrigations++;
@@ -598,23 +726,28 @@ void IrrigationTask(void *pv)
 
         vTaskDelay(pdMS_TO_TICKS((uint32_t)(zona[id].duration * 1000)));
 
-        if (!isManualOverride) {
+        if (systemMode != 1) {
             digitalWrite(relayPin[id], RELAY_OFF);
         }
+
+        addLogEntry();
 
         // Reset mode so UI shows IDLE when no zone is actively irrigating
         if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             zona[id].mode = 0;
+            zona[id].duration = 0;
             xSemaphoreGive(zonaMutex);
         }
 
         portENTER_CRITICAL(&mux);
         activeIrrigations--;
-        if (activeIrrigations == 0 && !isManualOverride) {
+        if (activeIrrigations == 0 && systemMode != 1) {
             digitalWrite(RELAY_MAIN, RELAY_OFF);
             // digitalWrite(RELAY_POMPA, RELAY_OFF);
         }
         portEXIT_CRITICAL(&mux);
+
+        xSemaphoreGive(maxConcurrentIrrigationSemaphore);
     }
 }
 
@@ -631,6 +764,8 @@ void WebTask(void *pv)
     server.on("/api/relay",  HTTP_POST, handleRelay);
     server.on("/api/config", HTTP_GET, handleConfigGet);
     server.on("/api/config", HTTP_POST, handleConfigPost);
+    server.on("/api/schedule", HTTP_GET, handleScheduleGet);
+    server.on("/api/schedule", HTTP_POST, handleSchedulePost);
     server.on("/api/log",    HTTP_GET, handleLogGet);
 
     server.begin();
@@ -650,7 +785,7 @@ void ManualControlTask(void *pv)
 {
     while (1)
     {
-        if (isManualOverride && cfgManualMode == 1) {
+        if (systemMode == 1 && cfgManualMode == 1) {
             uint32_t now = millis();
             bool changed = false;
             
@@ -659,6 +794,11 @@ void ManualControlTask(void *pv)
                     manualRelayState[i] = false;
                     digitalWrite(relayPin[i], RELAY_OFF);
                     manualTimerOff[i] = 0;
+                    
+                    zona[i].duration = (now - manualStartTime[i]) / 1000.0;
+                    addLogEntry();
+                    zona[i].duration = 0;
+                    
                     changed = true;
                 }
             }
@@ -668,6 +808,46 @@ void ManualControlTask(void *pv)
             }
         }
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+// ==========================================
+// SCHEDULE TASK
+// ==========================================
+
+void ScheduleTask(void *pv)
+{
+    while (1)
+    {
+        if (systemMode == 2) {
+            DateTime now = rtc.now();
+            int currentHour = now.hour();
+            int currentMinute = now.minute();
+
+            // Cek setiap menit saja
+            if (lastScheduledMinute != currentMinute) {
+                lastScheduledMinute = currentMinute;
+                
+                if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                    for (int i = 0; i < 5; i++) {
+                        if (zoneSchedules[i].active && 
+                            zoneSchedules[i].hour == currentHour && 
+                            zoneSchedules[i].minute == currentMinute) 
+                        {
+                            // Cek jika soil moisture <= 80 (tidak terlalu basah)
+                            if (zona[i].soil <= 60.0) {
+                                zona[i].duration = zoneSchedules[i].duration;
+                                // Mode 3 menandakan "Schedule" / waktu penyiraman aktif
+                                zona[i].mode = 3; 
+                                xTaskNotifyGive(irrigationHandle[i]);
+                            }
+                        }
+                    }
+                    xSemaphoreGive(zonaMutex);
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -716,6 +896,7 @@ void setup()
     Serial.println(WiFi.softAPIP());
 
     zonaMutex = xSemaphoreCreateMutex();
+    maxConcurrentIrrigationSemaphore = xSemaphoreCreateCounting(3, 3);
 
     xTaskCreate(SensorTask, "Sensor", 4096, NULL, 5, NULL);
     xTaskCreate(FuzzyTask, "Fuzzy", 4096, NULL, 4, &fuzzyHandle);
@@ -730,6 +911,12 @@ void setup()
     // Task khusus untuk mode manual (menggantikan void loop)
     xTaskCreate(ManualControlTask, "ManualControl", 2048, NULL, 1, &manualControlHandle);
 
+    // Task untuk penjadwalan
+    xTaskCreate(ScheduleTask, "Schedule", 2048, NULL, 1, &scheduleHandle);
+
+    // Load jadwal dari SPIFFS
+    loadSchedule();
+
     Serial.println("Smart Nursery Siap");
 }
 
@@ -739,3 +926,5 @@ void loop()
     // Kita hapus task ini untuk menghemat resource memory.
     vTaskDelete(NULL);
 }
+
+

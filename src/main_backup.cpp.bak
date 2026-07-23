@@ -60,9 +60,6 @@ SemaphoreHandle_t maxConcurrentIrrigationSemaphore;
 // VARIABLE
 // ==========================================
 
-uint32_t lastWateringTime[5] = {0}; // Menyimpan waktu terakhir disiram (Unix time)
-const uint32_t COOLDOWN_SECONDS = 6 * 60 * 60; // Cooldown 6 jam
-
 struct Zona {
   float soil;
   float duration;
@@ -271,30 +268,39 @@ float f_Terang(float x) {
 // OUTPUT: DURASI PENYIRAMAN (Detik)
 // ==========================================
 float f_Mati(float z) {
-  if (z <= 0) return 1.0;
-  if (z > 0 && z < 10) return (10.0 - z) / (10.0 - 0.0);
+  if (z <= 0)
+    return 1.0;
+  if (z > 0 && z < 5)
+    return (5.0 - z) / (5.0 - 0.0);
   return 0.0;
 }
 
 float f_Pendek(float z) {
-  if (z <= 10 || z >= 90) return 0.0;
-  if (z > 10 && z <= 50) return (z - 10.0) / (50.0 - 10.0);
-  if (z > 50 && z < 90) return (90.0 - z) / (90.0 - 50.0);
+  if (z <= 5 || z >= 25)
+    return 0.0;
+  if (z > 5 && z <= 12)
+    return (z - 5.0) / (12.0 - 5.0);
+  if (z > 12 && z < 25)
+    return (25.0 - z) / (25.0 - 12.0);
   return 0.0;
 }
 
 float f_SedangOut(float z) {
-  if (z <= 70 || z >= 190) return 0.0;
-  if (z > 70 && z <= 130) return (z - 70.0) / (130.0 - 70.0);
-  if (z > 130 && z < 190) return (190.0 - z) / (190.0 - 130.0);
+  if (z <= 20 || z >= 45)
+    return 0.0;
+  if (z > 20 && z <= 32.5)
+    return (z - 20.0) / (32.5 - 20.0);
+  if (z > 32.5 && z < 45)
+    return (45.0 - z) / (45.0 - 32.5);
   return 0.0;
 }
 
 float f_Lama(float z) {
-  if (z <= 170) return 0.0;
-  if (z > 170 && z < 222) return (z - 170.0) / (222.0 - 170.0);
-  if (z >= 222) return 1.0;
-  return 0.0;
+  if (z <= 40)
+    return 0.0;
+  if (z > 40 && z < 60)
+    return (z - 40.0) / (60.0 - 40.0);
+  return 1.0;
 }
 
 // ==========================================
@@ -360,8 +366,7 @@ float prosesFuzzyMamdani(float kelembaban, float suhu, float cahaya) {
   float pembilang = 0.0;
   float penyebut = 0.0;
 
-  // Evaluasi dari 0 hingga 222 detik
-  for (float z = 0; z <= 222; z += 1.0) {
+  for (float z = 0; z <= 60; z += 1.0) {
     float m = fungsiMin(f_Mati(z), r_Mati);
     float p = fungsiMin(f_Pendek(z), r_Pendek);
     float s = fungsiMin(f_SedangOut(z), r_Sedang);
@@ -693,17 +698,9 @@ void FuzzyTask(void *pv) {
     }
 
     if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-      uint32_t currentTime = rtc.now().unixtime();
-      
       for (int i = 0; i < 5; i++) {
         float durasi =
             prosesFuzzyMamdani(zona[i].soil, temperature, lightLevel);
-            
-        // Cek cooldown: Jika belum lewat 6 jam, abaikan hasil fuzzy (set ke 0)
-        if (lastWateringTime[i] != 0 && (currentTime - lastWateringTime[i]) < COOLDOWN_SECONDS) {
-            durasi = 0;
-        }
-            
         zona[i].duration = durasi;
         if (durasi > 0) {
           if (durasi <= 20)
@@ -755,9 +752,6 @@ void IrrigationTask(void *pv) {
     }
 
     addLogEntry();
-
-    // Catat waktu selesai penyiraman untuk cooldown
-    lastWateringTime[id] = rtc.now().unixtime();
 
     // Reset mode so UI shows IDLE when no zone is actively irrigating
     if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
