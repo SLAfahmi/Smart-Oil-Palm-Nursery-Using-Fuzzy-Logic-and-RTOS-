@@ -709,7 +709,7 @@ void SensorTask(void *pv) {
 
     static uint32_t lastHourlyLog = 0;
     uint32_t currentSec = getCurrentTimeSeconds();
-    
+
     // Log per jam (3600 detik)
     if (lastHourlyLog == 0 || (currentSec - lastHourlyLog >= 3600)) {
       addLogEntry();
