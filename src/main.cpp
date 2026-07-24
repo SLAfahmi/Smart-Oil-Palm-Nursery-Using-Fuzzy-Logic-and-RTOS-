@@ -4,12 +4,10 @@
 #include <SPIFFS.h>
 #include <Wire.h>
 
-
 #include <ArduinoJson.h>
 #include <RTClib.h>
 #include <WebServer.h>
 #include <WiFi.h>
-
 
 // ==========================================
 // WIFI
@@ -60,8 +58,19 @@ SemaphoreHandle_t maxConcurrentIrrigationSemaphore;
 // VARIABLE
 // ==========================================
 
-uint32_t lastWateringTime[5] = {0}; // Menyimpan waktu terakhir disiram (Unix time)
-const uint32_t COOLDOWN_SECONDS = 6 * 60 * 60; // Cooldown 6 jam
+uint32_t lastWateringTime[5] = {
+    0}; // Menyimpan waktu terakhir disiram (Unix time / fallback millis)
+const uint32_t COOLDOWN_SECONDS =
+    4 * 60 * 60; // Cooldown setelah penyiraman ke penyiraman berikutnya 4 jam
+bool rtcAvailable = false;
+
+uint32_t getCurrentTimeSeconds() {
+  if (rtcAvailable) {
+    DateTime now = rtc.now();
+    return now.unixtime();
+  }
+  return millis() / 1000UL;
+}
 
 struct Zona {
   float soil;
@@ -90,7 +99,8 @@ struct Schedule {
   uint8_t minute;
   uint32_t duration;
 };
-Schedule zoneSchedules[5];
+#define MAX_SCHEDULES 3
+Schedule zoneSchedules[5][MAX_SCHEDULES];
 int lastScheduledMinute = -1;
 
 // ==========================================
@@ -271,29 +281,40 @@ float f_Terang(float x) {
 // OUTPUT: DURASI PENYIRAMAN (Detik)
 // ==========================================
 float f_Mati(float z) {
-  if (z <= 0) return 1.0;
-  if (z > 0 && z < 10) return (10.0 - z) / (10.0 - 0.0);
+  if (z <= 0)
+    return 1.0;
+  if (z > 0 && z < 10)
+    return (10.0 - z) / (10.0 - 0.0);
   return 0.0;
 }
 
 float f_Pendek(float z) {
-  if (z <= 10 || z >= 90) return 0.0;
-  if (z > 10 && z <= 50) return (z - 10.0) / (50.0 - 10.0);
-  if (z > 50 && z < 90) return (90.0 - z) / (90.0 - 50.0);
+  if (z <= 10 || z >= 90)
+    return 0.0;
+  if (z > 10 && z <= 50)
+    return (z - 10.0) / (50.0 - 10.0);
+  if (z > 50 && z < 90)
+    return (90.0 - z) / (90.0 - 50.0);
   return 0.0;
 }
 
 float f_SedangOut(float z) {
-  if (z <= 70 || z >= 190) return 0.0;
-  if (z > 70 && z <= 130) return (z - 70.0) / (130.0 - 70.0);
-  if (z > 130 && z < 190) return (190.0 - z) / (190.0 - 130.0);
+  if (z <= 70 || z >= 190)
+    return 0.0;
+  if (z > 70 && z <= 130)
+    return (z - 70.0) / (130.0 - 70.0);
+  if (z > 130 && z < 190)
+    return (190.0 - z) / (190.0 - 130.0);
   return 0.0;
 }
 
 float f_Lama(float z) {
-  if (z <= 170) return 0.0;
-  if (z > 170 && z < 222) return (z - 170.0) / (222.0 - 170.0);
-  if (z >= 222) return 1.0;
+  if (z <= 170)
+    return 0.0;
+  if (z > 170 && z < 222)
+    return (z - 170.0) / (222.0 - 170.0);
+  if (z >= 222)
+    return 1.0;
   return 0.0;
 }
 
@@ -534,10 +555,14 @@ void saveSchedule() {
   JsonArray arr = doc.to<JsonArray>();
   for (int i = 0; i < 5; i++) {
     JsonObject z = arr.add<JsonObject>();
-    z["active"] = zoneSchedules[i].active;
-    z["hour"] = zoneSchedules[i].hour;
-    z["minute"] = zoneSchedules[i].minute;
-    z["duration"] = zoneSchedules[i].duration;
+    JsonArray sArr = z["schedules"].to<JsonArray>();
+    for (int j = 0; j < MAX_SCHEDULES; j++) {
+      JsonObject sObj = sArr.add<JsonObject>();
+      sObj["active"] = zoneSchedules[i][j].active;
+      sObj["hour"] = zoneSchedules[i][j].hour;
+      sObj["minute"] = zoneSchedules[i][j].minute;
+      sObj["duration"] = zoneSchedules[i][j].duration;
+    }
   }
   File file = SPIFFS.open("/schedule.json", "w");
   if (file) {
@@ -556,10 +581,14 @@ void loadSchedule() {
         JsonArray arr = doc.as<JsonArray>();
         for (int i = 0; i < 5 && i < arr.size(); i++) {
           JsonObject z = arr[i];
-          zoneSchedules[i].active = z["active"] | false;
-          zoneSchedules[i].hour = z["hour"] | 0;
-          zoneSchedules[i].minute = z["minute"] | 0;
-          zoneSchedules[i].duration = z["duration"] | 10;
+          JsonArray sArr = z["schedules"];
+          for (int j = 0; j < MAX_SCHEDULES && j < sArr.size(); j++) {
+            JsonObject sObj = sArr[j];
+            zoneSchedules[i][j].active = sObj["active"] | false;
+            zoneSchedules[i][j].hour = sObj["hour"] | 0;
+            zoneSchedules[i][j].minute = sObj["minute"] | 0;
+            zoneSchedules[i][j].duration = sObj["duration"] | 10;
+          }
         }
       }
       file.close();
@@ -573,10 +602,14 @@ void handleScheduleGet() {
   for (int i = 0; i < 5; i++) {
     JsonObject z = arr.add<JsonObject>();
     z["id"] = i + 1;
-    z["active"] = zoneSchedules[i].active;
-    z["hour"] = zoneSchedules[i].hour;
-    z["minute"] = zoneSchedules[i].minute;
-    z["duration"] = zoneSchedules[i].duration;
+    JsonArray sArr = z["schedules"].to<JsonArray>();
+    for (int j = 0; j < MAX_SCHEDULES; j++) {
+      JsonObject sObj = sArr.add<JsonObject>();
+      sObj["active"] = zoneSchedules[i][j].active;
+      sObj["hour"] = zoneSchedules[i][j].hour;
+      sObj["minute"] = zoneSchedules[i][j].minute;
+      sObj["duration"] = zoneSchedules[i][j].duration;
+    }
   }
   String response;
   serializeJson(doc, response);
@@ -591,10 +624,14 @@ void handleSchedulePost() {
       JsonArray arr = doc.as<JsonArray>();
       for (int i = 0; i < 5 && i < arr.size(); i++) {
         JsonObject z = arr[i];
-        zoneSchedules[i].active = z["active"] | false;
-        zoneSchedules[i].hour = z["hour"] | 0;
-        zoneSchedules[i].minute = z["minute"] | 0;
-        zoneSchedules[i].duration = z["duration"] | 10;
+        JsonArray sArr = z["schedules"];
+        for (int j = 0; j < MAX_SCHEDULES && j < sArr.size(); j++) {
+          JsonObject sObj = sArr[j];
+          zoneSchedules[i][j].active = sObj["active"] | false;
+          zoneSchedules[i][j].hour = sObj["hour"] | 0;
+          zoneSchedules[i][j].minute = sObj["minute"] | 0;
+          zoneSchedules[i][j].duration = sObj["duration"] | 10;
+        }
       }
       saveSchedule();
       server.send(200, "text/plain", "OK");
@@ -670,7 +707,14 @@ void SensorTask(void *pv) {
     if (isnan(humidity))
       humidity = 00.0;
 
-    addLogEntry();
+    static uint32_t lastHourlyLog = 0;
+    uint32_t currentSec = getCurrentTimeSeconds();
+    
+    // Log per jam (3600 detik)
+    if (lastHourlyLog == 0 || (currentSec - lastHourlyLog >= 3600)) {
+      addLogEntry();
+      lastHourlyLog = currentSec;
+    }
 
     if (systemMode == 0 && activeIrrigations == 0) {
       xTaskNotifyGive(fuzzyHandle);
@@ -693,25 +737,21 @@ void FuzzyTask(void *pv) {
     }
 
     if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-      uint32_t currentTime = rtc.now().unixtime();
-      
+      uint32_t currentTime = getCurrentTimeSeconds();
+
       for (int i = 0; i < 5; i++) {
         float durasi =
             prosesFuzzyMamdani(zona[i].soil, temperature, lightLevel);
-            
-        // Cek cooldown: Jika belum lewat 6 jam, abaikan hasil fuzzy (set ke 0)
-        if (lastWateringTime[i] != 0 && (currentTime - lastWateringTime[i]) < COOLDOWN_SECONDS) {
-            durasi = 0;
+
+        // Cek cooldown: Jika belum lewat 4 jam, abaikan hasil fuzzy (set ke 0)
+        if (lastWateringTime[i] != 0 &&
+            (currentTime - lastWateringTime[i]) < COOLDOWN_SECONDS) {
+          durasi = 0;
         }
-            
+
         zona[i].duration = durasi;
         if (durasi > 0) {
-          if (durasi <= 20)
-            zona[i].mode = 1;
-          else if (durasi <= 40)
-            zona[i].mode = 2;
-          else
-            zona[i].mode = 3;
+          zona[i].mode = 4; // 4 = Queued
           xTaskNotifyGive(irrigationHandle[i]);
         } else {
           zona[i].mode = 0;
@@ -740,6 +780,33 @@ void IrrigationTask(void *pv) {
     // Tunggu giliran jika sudah ada 3 sub yang aktif
     xSemaphoreTake(maxConcurrentIrrigationSemaphore, portMAX_DELAY);
 
+    // Cek ulang mode jika user mengubah ke manual saat task sedang di antrian
+    // (queue)
+    if (systemMode == 1) {
+      if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        zona[id].mode = 0;
+        zona[id].duration = 0;
+        xSemaphoreGive(zonaMutex);
+      }
+      xSemaphoreGive(maxConcurrentIrrigationSemaphore);
+      continue;
+    }
+
+    // Set mode aktual (Active) setelah berhasil keluar dari antrian
+    if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (systemMode == 2) {
+        zona[id].mode = 3; // Schedule mode
+      } else {
+        if (zona[id].duration <= 20)
+          zona[id].mode = 1;
+        else if (zona[id].duration <= 40)
+          zona[id].mode = 2;
+        else
+          zona[id].mode = 3;
+      }
+      xSemaphoreGive(zonaMutex);
+    }
+
     portENTER_CRITICAL(&mux);
     activeIrrigations++;
     portEXIT_CRITICAL(&mux);
@@ -757,7 +824,7 @@ void IrrigationTask(void *pv) {
     addLogEntry();
 
     // Catat waktu selesai penyiraman untuk cooldown
-    lastWateringTime[id] = rtc.now().unixtime();
+    lastWateringTime[id] = getCurrentTimeSeconds();
 
     // Reset mode so UI shows IDLE when no zone is actively irrigating
     if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -852,15 +919,19 @@ void ScheduleTask(void *pv) {
 
         if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
           for (int i = 0; i < 5; i++) {
-            if (zoneSchedules[i].active &&
-                zoneSchedules[i].hour == currentHour &&
-                zoneSchedules[i].minute == currentMinute) {
-              // Cek jika soil moisture <= 80 (tidak terlalu basah)
-              if (zona[i].soil <= 60.0) {
-                zona[i].duration = zoneSchedules[i].duration;
-                // Mode 3 menandakan "Schedule" / waktu penyiraman aktif
-                zona[i].mode = 3;
-                xTaskNotifyGive(irrigationHandle[i]);
+            for (int j = 0; j < MAX_SCHEDULES; j++) {
+              if (zoneSchedules[i][j].active &&
+                  zoneSchedules[i][j].hour == currentHour &&
+                  zoneSchedules[i][j].minute == currentMinute) {
+                // Cek jika soil moisture <= 60 (tidak terlalu basah)
+                if (zona[i].soil <= 60.0) {
+                  zona[i].duration = zoneSchedules[i][j].duration;
+                  // Masukkan ke dalam antrian terlebih dahulu (mode 4)
+                  zona[i].mode = 4;
+                  xTaskNotifyGive(irrigationHandle[i]);
+                }
+                break; // Jika salah satu jadwal cocok, tidak usah cek jadwal
+                       // lain untuk menit ini
               }
             }
           }
@@ -900,8 +971,11 @@ void setup() {
   }
 
   if (!rtc.begin()) {
-    Serial.println("Gagal menemukan RTC DS3231!");
+    rtcAvailable = false;
+    Serial.println(
+        "Gagal menemukan RTC DS3231! Menggunakan millis() untuk cooldown");
   } else {
+    rtcAvailable = true;
     if (rtc.lostPower()) {
       Serial.println(
           "RTC kehilangan daya, mengatur waktu ke waktu kompilasi...");

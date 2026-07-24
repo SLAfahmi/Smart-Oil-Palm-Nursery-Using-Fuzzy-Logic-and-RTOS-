@@ -158,8 +158,7 @@
                     <div
                         style="font-size:0.875rem; font-weight:700; color:var(--clr-on-surface); margin-bottom: 0.5rem;">
                         Konfigurasi Jadwal Penyiraman</div>
-                         <div
-                        style="font-size:0.875rem; font-weight:700; margin-bottom: 0.5rem; color:var(--clr-error);">
+                    <div style="font-size:0.875rem; font-weight:700; margin-bottom: 0.5rem; color:var(--clr-error);">
                         MAKSIMAL 3 ZONA AKTIF DALAM SATU WAKTU</div>
                     <div id="schedule-container" style="display:flex; flex-direction:column; gap:0.5rem;">
                         <!-- Diisi via JS -->
@@ -426,9 +425,7 @@
                             style="flex:1; min-width:200px; padding-left:1.5rem; border-left:1px solid var(--clr-outline-var);">
                             <label style="font-size:0.875rem; font-weight:700; color:var(--clr-on-surface)">Export Log
                                 Data</label>
-                            <div style="font-size:0.7rem; color:var(--clr-on-surface-var); margin-bottom:0.5rem;">Unduh
-                                100
-                                log terbaru (.csv)</div>
+                            <div style="font-size:0.7rem; color:var(--clr-on-surface-var); margin-bottom:0.5rem;">Unduh 100 log terbaru (.csv)</div>
                             <button class="btn btn-secondary" onclick="exportCSV()"
                                 style="padding:0.5rem 1rem; width:100%;">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -569,12 +566,14 @@
 
                     let avgSoil = 0;
                     let activeCount = 0;
+                    let queuedCount = 0;
                     let systemMode = data.systemMode;
 
                     data.zona.forEach(z => {
                         avgSoil += z.soil;
-                        if (z.mode > 0) activeCount++;
-                        updateValve(String(z.id - 1), z.relayState, systemMode == 1);
+                        if (z.mode > 0 && z.mode < 4) activeCount++;
+                        if (z.mode === 4) queuedCount++;
+                        updateValve(String(z.id - 1), z.relayState, systemMode == 1, z.mode);
 
                         const soilEl = document.getElementById('soil-val-' + (z.id - 1));
                         if (soilEl) soilEl.innerText = z.soil.toFixed(1);
@@ -593,8 +592,10 @@
                         badge.innerText = 'SCHEDULE';
                         badge.className = 'mode-badge schedule';
                         document.getElementById('irrig-time').innerText = '--';
-                    } else if (activeCount > 0) {
-                        badge.innerText = 'ACTIVE (' + activeCount + ')';
+                    } else if (activeCount > 0 || queuedCount > 0) {
+                        let txt = 'ACTIVE (' + activeCount + ')';
+                        if (queuedCount > 0) txt += ' | QUEUE (' + queuedCount + ')';
+                        badge.innerText = txt;
                         badge.className = 'mode-badge active';
                         document.getElementById('irrig-time').innerText = '--';
                     } else {
@@ -607,14 +608,14 @@
                     document.getElementById('manualSettings').style.display = (systemMode == 1) ? 'flex' : 'none';
                     document.getElementById('scheduleSettings').style.display = (systemMode == 2) ? 'flex' : 'none';
 
-                    updateValve('main', data.relayMain, systemMode == 1);
+                    updateValve('main', data.relayMain, systemMode == 1, 0);
 
                     updateTimestamp();
                 })
                 .catch((e) => { alert("FetchData Error: " + e.message); });
         }
 
-        function updateValve(id, state, isManual) {
+        function updateValve(id, state, isManual, mode) {
             const toggle = document.getElementById('toggle-' + id);
             const wrap = document.getElementById('toggle-wrap-' + id);
             const badge = document.getElementById('badge-' + id);
@@ -626,10 +627,26 @@
                 wrap.classList.remove('disabled');
                 badge.innerText = 'Manual';
                 badge.className = 'valve-mode-badge manual';
+                badge.style.backgroundColor = '';
+                badge.style.color = '';
             } else {
                 wrap.classList.add('disabled');
-                badge.innerText = 'Auto';
-                badge.className = 'valve-mode-badge';
+                if (mode === 4) {
+                    badge.innerText = 'Queued';
+                    badge.className = 'valve-mode-badge queued';
+                    badge.style.backgroundColor = '#fef3c7';
+                    badge.style.color = '#92400e';
+                } else if (mode > 0) {
+                    badge.innerText = 'Active';
+                    badge.className = 'valve-mode-badge active';
+                    badge.style.backgroundColor = '#d1fae5';
+                    badge.style.color = '#065f46';
+                } else {
+                    badge.innerText = 'Auto';
+                    badge.className = 'valve-mode-badge';
+                    badge.style.backgroundColor = '';
+                    badge.style.color = '';
+                }
             }
         }
 
@@ -688,21 +705,44 @@
             const container = document.getElementById('schedule-container');
             let html = '';
             for (let i = 0; i < NUM_ZONES; i++) {
+                let slotsHtml = '';
+                for (let j = 0; j < 3; j++) {
+                    slotsHtml += `
+                    <div id="sch-row-${i}-${j}" style="display:${j === 0 ? 'flex' : 'none'}; align-items:center; gap:0.5rem; padding-left:0.5rem; border-left:2px solid var(--clr-primary);">
+                        <label class="toggle-wrap" style="transform: scale(0.8);">
+                            <input type="checkbox" class="toggle-input" id="sch-active-${i}-${j}">
+                            <div class="toggle-track"></div>
+                        </label>
+                        <input type="time" id="sch-time-${i}-${j}" style="padding:0.25rem; border:1px solid var(--clr-outline-var); border-radius:0.25rem; background:var(--clr-surface-card); color:var(--clr-on-surface)">
+                        <input type="number" id="sch-dur-${i}-${j}" min="1" max="3600" placeholder="Durasi (detik)" style="width:6rem; padding:0.25rem; border:1px solid var(--clr-outline-var); border-radius:0.25rem; background:var(--clr-surface-card); color:var(--clr-on-surface)">
+                    </div>
+                    `;
+                }
+
                 html += `
-                <div style="display:flex; align-items:center; gap:0.5rem; background:var(--clr-surface); padding:0.5rem; border-radius:0.25rem;">
-                    <div style="flex:1; font-weight:600;">Zona ${i + 1}</div>
-                    <label class="toggle-wrap" id="sch-wrap-${i}" style="transform: scale(0.8);">
-                        <input type="checkbox" class="toggle-input" id="sch-active-${i}">
-                        <div class="toggle-track"></div>
-                    </label>
-                    <input type="number" id="sch-hour-${i}" min="0" max="23" placeholder="Jam" style="width:3.5rem; padding:0.25rem; border:1px solid var(--clr-outline-var); border-radius:0.25rem; background:var(--clr-surface-card); color:var(--clr-on-surface)">
-                    :
-                    <input type="number" id="sch-minute-${i}" min="0" max="59" placeholder="Menit" style="width:3.5rem; padding:0.25rem; border:1px solid var(--clr-outline-var); border-radius:0.25rem; background:var(--clr-surface-card); color:var(--clr-on-surface)">
-                    <input type="number" id="sch-dur-${i}" min="1" max="3600" placeholder="Durasi" style="width:4.8rem; padding:0.25rem; border:1px solid var(--clr-outline-var); border-radius:0.25rem; background:var(--clr-surface-card); color:var(--clr-on-surface)">
+                <div style="display:flex; flex-direction:column; gap:0.5rem; background:var(--clr-surface); padding:0.5rem; border-radius:0.25rem;">
+                    <div style="display:flex; align-items:center; justify-content:space-between;">
+                        <div style="font-weight:600;">Zona ${i + 1}</div>
+                        <select id="sch-count-${i}" onchange="updateScheduleCount(${i})" style="padding:0.25rem; border-radius:0.25rem; border:1px solid var(--clr-outline-var); background:var(--clr-surface-card); color:var(--clr-on-surface)">
+                            <option value="1">1x Sehari</option>
+                            <option value="2">2x Sehari</option>
+                            <option value="3">3x Sehari</option>
+                        </select>
+                    </div>
+                    <div id="sch-slots-${i}" style="display:flex; flex-direction:column; gap:0.5rem;">
+                        ${slotsHtml}
+                    </div>
                 </div>
                 `;
             }
             container.innerHTML = html;
+        }
+
+        function updateScheduleCount(zoneIndex) {
+            const count = parseInt(document.getElementById('sch-count-' + zoneIndex).value);
+            for (let j = 0; j < 3; j++) {
+                document.getElementById('sch-row-' + zoneIndex + '-' + j).style.display = (j < count) ? 'flex' : 'none';
+            }
         }
 
         function fetchSchedule() {
@@ -710,21 +750,29 @@
                 .then(r => r.json())
                 .then(data => {
                     data.forEach((z, i) => {
-                        const activeEl = document.getElementById('sch-active-' + i);
-                        const hourEl = document.getElementById('sch-hour-' + i);
-                        const minuteEl = document.getElementById('sch-minute-' + i);
-                        const durEl = document.getElementById('sch-dur-' + i);
+                        let activeCount = 1;
+                        if (z.schedules && z.schedules.length > 0) {
+                            z.schedules.forEach((s, j) => {
+                                if (j >= 3) return;
+                                const activeEl = document.getElementById('sch-active-' + i + '-' + j);
+                                const timeEl = document.getElementById('sch-time-' + i + '-' + j);
+                                const durEl = document.getElementById('sch-dur-' + i + '-' + j);
 
-                        activeEl.checked = z.active;
-                        if (z.active) {
-                            hourEl.value = z.hour !== null ? z.hour : '';
-                            minuteEl.value = z.minute !== null ? z.minute : '';
-                            durEl.value = z.duration !== null ? z.duration : '';
-                        } else {
-                            hourEl.value = '';
-                            minuteEl.value = '';
-                            durEl.value = '';
+                                activeEl.checked = s.active;
+                                if (s.active && j >= activeCount) activeCount = j + 1;
+
+                                if (s.hour !== null && s.minute !== null && s.hour !== undefined && s.minute !== undefined) {
+                                    const hh = String(s.hour).padStart(2, '0');
+                                    const mm = String(s.minute).padStart(2, '0');
+                                    timeEl.value = `${hh}:${mm}`;
+                                } else {
+                                    timeEl.value = '';
+                                }
+                                durEl.value = s.duration !== null ? s.duration : '';
+                            });
                         }
+                        document.getElementById('sch-count-' + i).value = activeCount;
+                        updateScheduleCount(i);
                     });
                 })
                 .catch(() => { });
@@ -733,16 +781,32 @@
         function saveSchedule() {
             const payload = [];
             for (let i = 0; i < NUM_ZONES; i++) {
-                const hourValue = document.getElementById('sch-hour-' + i).value;
-                const minuteValue = document.getElementById('sch-minute-' + i).value;
-                const durationValue = document.getElementById('sch-dur-' + i).value;
+                const count = parseInt(document.getElementById('sch-count-' + i).value);
+                const schedules = [];
+                for (let j = 0; j < 3; j++) {
+                    if (j < count) {
+                        const timeValue = document.getElementById('sch-time-' + i + '-' + j).value;
+                        const durationValue = document.getElementById('sch-dur-' + i + '-' + j).value;
+                        
+                        let hour = null;
+                        let minute = null;
+                        if (timeValue) {
+                            const parts = timeValue.split(':');
+                            hour = parseInt(parts[0]);
+                            minute = parseInt(parts[1]);
+                        }
 
-                payload.push({
-                    active: document.getElementById('sch-active-' + i).checked,
-                    hour: hourValue === '' ? null : parseInt(hourValue),
-                    minute: minuteValue === '' ? null : parseInt(minuteValue),
-                    duration: durationValue === '' ? null : parseInt(durationValue)
-                });
+                        schedules.push({
+                            active: document.getElementById('sch-active-' + i + '-' + j).checked,
+                            hour: hour,
+                            minute: minute,
+                            duration: durationValue === '' ? null : parseInt(durationValue)
+                        });
+                    } else {
+                        schedules.push({ active: false, hour: 0, minute: 0, duration: 10 });
+                    }
+                }
+                payload.push({ schedules: schedules });
             }
             fetch('/api/schedule', {
                 method: 'POST',
@@ -848,12 +912,12 @@
                     let csvContent = "data:text/csv;charset=utf-8,";
 
                     // Header Row 1
-                    csvContent += "TIMESTAMP DATE,ZONA 1,,ZONA 2,,ZONA 3,,ZONA 4,,ZONA 5,,MODE\r\n";
+                    csvContent += "TIMESTAMP DATE,SUHU (°C),CAHAYA (Lux),ZONA 1,,ZONA 2,,ZONA 3,,ZONA 4,,ZONA 5,,MODE\r\n";
                     // Header Row 2
-                    csvContent += ",KELEMBABAN:,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN:,DURASI :,AUTO / MANUAL / PENJADWALAN\r\n";
+                    csvContent += ",,,KELEMBABAN:,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN:,DURASI :,AUTO / MANUAL / PENJADWALAN\r\n";
 
                     data.forEach(r => {
-                        let row = [r.timestamp];
+                        let row = [r.timestamp, r.temp.toFixed(1), r.light.toFixed(0)];
 
                         // ZONA 1 to 5
                         for (let i = 0; i < NUM_ZONES; i++) {
