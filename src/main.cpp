@@ -1019,7 +1019,6 @@ void setup() {
 }
 
 void loop() {
-  // Karena kita sudah full RTOS, default loop task dari Arduino tidak dipakai.
-  // Kita hapus task ini untuk menghemat resource memory.
+  
   vTaskDelete(NULL);
 }
