@@ -60,8 +60,7 @@ SemaphoreHandle_t maxConcurrentIrrigationSemaphore;
 
 uint32_t lastWateringTime[5] = {
     0}; // Menyimpan waktu terakhir disiram (Unix time / fallback millis)
-const uint32_t COOLDOWN_SECONDS =
-    4 * 60 * 60; // Cooldown setelah penyiraman ke penyiraman berikutnya 4 jam
+const uint32_t COOLDOWN_SECONDS =  60; // Cooldown setelah penyiraman ke penyiraman berikutnya 4 jam
 bool rtcAvailable = false;
 
 uint32_t getCurrentTimeSeconds() {
@@ -400,7 +399,7 @@ float prosesFuzzyMamdani(float kelembaban, float suhu, float cahaya) {
   float hasil = pembilang / penyebut;
 
   // safety guard: jika hasil sangat kecil mendekati nol, bulatkan ke 0.
-  if (hasil < 2.0)
+  if (hasil < 10.0)
     return 0.0;
 
   return hasil;
