@@ -912,16 +912,17 @@
                     let csvContent = "data:text/csv;charset=utf-8,";
 
                     // Header Row 1
-                    csvContent += "TIMESTAMP DATE,SUHU (°C),CAHAYA (Lux),ZONA 1,,ZONA 2,,ZONA 3,,ZONA 4,,ZONA 5,,MODE\r\n";
+                    csvContent += "TIMESTAMP DATE,SUHU (°C),CAHAYA (Lux),ZONA 1,,,ZONA 2,,,ZONA 3,,,ZONA 4,,,ZONA 5,,,MODE\r\n";
                     // Header Row 2
-                    csvContent += ",,,KELEMBABAN:,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN :,DURASI :,KELEMBABAN:,DURASI :,AUTO / MANUAL / PENJADWALAN\r\n";
+                    csvContent += ",,,MOIS SEBELUM,MOIS SESUDAH,DURASI,MOIS SEBELUM,MOIS SESUDAH,DURASI,MOIS SEBELUM,MOIS SESUDAH,DURASI,MOIS SEBELUM,MOIS SESUDAH,DURASI,MOIS SEBELUM,MOIS SESUDAH,DURASI,AUTO / MANUAL / PENJADWALAN\r\n";
 
                     data.forEach(r => {
                         let row = [r.timestamp, r.temp.toFixed(1), r.light.toFixed(0)];
 
                         // ZONA 1 to 5
                         for (let i = 0; i < NUM_ZONES; i++) {
-                            row.push(r.soil[i].toFixed(1));
+                            row.push(r.soilBefore[i].toFixed(1));
+                            row.push(r.soilAfter[i].toFixed(1));
                             row.push(r.duration[i].toFixed(1));
                         }
 

@@ -60,7 +60,8 @@ SemaphoreHandle_t maxConcurrentIrrigationSemaphore;
 
 uint32_t lastWateringTime[5] = {
     0}; // Menyimpan waktu terakhir disiram (Unix time / fallback millis)
-const uint32_t COOLDOWN_SECONDS =  60; // Cooldown setelah penyiraman ke penyiraman berikutnya 4 jam
+const uint32_t COOLDOWN_SECONDS =
+    4 * 60 * 60; // Cooldown setelah penyiraman ke penyiraman berikutnya 4 jam
 bool rtcAvailable = false;
 
 uint32_t getCurrentTimeSeconds() {
@@ -73,6 +74,7 @@ uint32_t getCurrentTimeSeconds() {
 
 struct Zona {
   float soil;
+  float soilBefore;
   float duration;
   int mode; // 0=Off, 1=Short, 2=Medium, 3=Long
 };
@@ -134,7 +136,8 @@ struct LogEntry {
   float temp;
   float hum;
   float light;
-  float soil[5];
+  float soilBefore[5];
+  float soilAfter[5];
   int mode[5];
   float duration[5];
   int sysMode;
@@ -153,7 +156,8 @@ void addLogEntry() {
   logBuffer[logHead].hum = humidity;
   logBuffer[logHead].light = lightLevel;
   for (int i = 0; i < 5; i++) {
-    logBuffer[logHead].soil[i] = zona[i].soil;
+    logBuffer[logHead].soilBefore[i] = zona[i].soilBefore;
+    logBuffer[logHead].soilAfter[i] = zona[i].soil;
     logBuffer[logHead].mode[i] = zona[i].mode;
     logBuffer[logHead].duration[i] = zona[i].duration;
   }
@@ -187,32 +191,34 @@ float fungsiMax(float a, float b) { return (a > b) ? a : b; }
 // FUNGSI KEANGGOTAAN FUZZY (BERDASARKAN Y)
 // ==========================================
 
-// 1. Himpunan Kering (Y rendah)
+// 1. Himpunan Kering
 float f_Kering(float y) {
-  if (y <= 12.0)
+  if (y <= 30.0)
     return 1.0;
-  if (y > 12.0 && y < 20.0)
-    return (20.0 - y) / (20.0 - 12.0);
+  if (y > 30.0 && y < 45.0)
+    return (45.0 - y) / (45.0 - 30.0);
   return 0.0;
 }
 
-// 2. Himpunan Lembab (Y sedang)
+// 2. Himpunan Lembab
 float f_Lembab(float y) {
-  if (y <= 12.0 || y >= 30.0)
+  if (y <= 30.0 || y >= 65.0)
     return 0.0;
-  if (y > 12.0 && y <= 21.0)
-    return (y - 12.0) / (21.0 - 12.0);
-  if (y > 21.0 && y < 30.0)
-    return (30.0 - y) / (30.0 - 21.0);
+  if (y > 30.0 && y < 45.0)
+    return (y - 30.0) / (45.0 - 30.0);
+  if (y >= 45.0 && y <= 50.0)
+    return 1.0;
+  if (y > 50.0 && y < 65.0)
+    return (65.0 - y) / (65.0 - 50.0);
   return 0.0;
 }
 
-// 3. Himpunan Basah (Y tinggi)
+// 3. Himpunan Basah (65 ke atas = 1.0)
 float f_Basah(float y) {
-  if (y <= 22.0)
+  if (y <= 50.0)
     return 0.0;
-  if (y > 22.0 && y < 30.0)
-    return (y - 22.0) / (30.0 - 22.0);
+  if (y > 50.0 && y < 65.0)
+    return (y - 50.0) / (65.0 - 50.0);
   return 1.0;
 }
 
@@ -653,11 +659,13 @@ void handleLogGet() {
     obj["hum"] = logBuffer[idx].hum;
     obj["light"] = logBuffer[idx].light;
 
-    JsonArray sArr = obj["soil"].to<JsonArray>();
+    JsonArray sBArr = obj["soilBefore"].to<JsonArray>();
+    JsonArray sAArr = obj["soilAfter"].to<JsonArray>();
     JsonArray mArr = obj["mode"].to<JsonArray>();
     JsonArray dArr = obj["duration"].to<JsonArray>();
     for (int j = 0; j < 5; j++) {
-      sArr.add(logBuffer[idx].soil[j]);
+      sBArr.add(logBuffer[idx].soilBefore[j]);
+      sAArr.add(logBuffer[idx].soilAfter[j]);
       mArr.add(logBuffer[idx].mode[j]);
       dArr.add(logBuffer[idx].duration[j]);
     }
@@ -693,6 +701,11 @@ void SensorTask(void *pv) {
 
         // 3. Batasi nilai agar tetap di rentang 0 - 100
         zona[i].soil = constrain(mappedSoil, 0.0f, 100.0f);
+        
+        // Simpan nilai soilBefore jika zona sedang tidak aktif
+        if (zona[i].mode == 0 && !manualRelayState[i]) {
+            zona[i].soilBefore = zona[i].soil;
+        }
       }
       xSemaphoreGive(zonaMutex);
     }
@@ -1017,7 +1030,4 @@ void setup() {
   Serial.println("Smart Nursery Siap");
 }
 
-void loop() {
-  
-  vTaskDelete(NULL);
-}
+void loop() { vTaskDelete(NULL); }
