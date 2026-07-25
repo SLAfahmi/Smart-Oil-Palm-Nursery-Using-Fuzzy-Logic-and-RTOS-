@@ -181,7 +181,7 @@ float fungsiMax(float a, float b) { return (a > b) ? a : b; }
 
 // ==========================================
 // INPUT 1: KELEMBABAN TANAH (%)
-// NOTE: kelembabanTanah di sini memakai mapping yang UDAH GWEH GANTI
+// NOTE: nilai sensor kelembaban dari nilai Regresi Linear (ADC) yang sudah di-mapping ke 0-100%
 // (ADC kecil = basah, ADC besar = kering).
 // 0% = kering, 100% = basah
 // "basah/kering" ditangani di dalam fungsi keanggotaan,
