@@ -13,7 +13,7 @@
 // WIFI
 // ==========================================
 
-const char *apSsid = "SmartNursery-AP";
+const char *apSsid = "SmartNursery-TelU";
 const char *apPassword = "12345678";
 
 // ==========================================
@@ -60,7 +60,7 @@ SemaphoreHandle_t maxConcurrentIrrigationSemaphore;
 
 uint32_t lastWateringTime[5] = {
     0}; // Menyimpan waktu terakhir disiram (Unix time / fallback millis)
-const uint32_t COOLDOWN_SECONDS =
+uint32_t cfgCooldown =
     4 * 60 * 60; // Cooldown setelah penyiraman ke penyiraman berikutnya 4 jam
 bool rtcAvailable = false;
 
@@ -110,6 +110,9 @@ int lastScheduledMinute = -1;
 uint32_t cfgSensorInterval = 10; // detik
 int cfgManualMode = 0;           // 0 = Toggle, 1 = Timer
 uint32_t cfgManualDur = 10;      // detik (durasi timer manual)
+uint32_t cfgLogInterval = 3600;  // detik (interval log otomatis)
+// File log persistensi SPIFFS
+const char *LOG_FILE = "/logs.txt";
 
 // Timer untuk manual mode
 uint32_t manualTimerOff[5] = {0};
@@ -147,6 +150,80 @@ LogEntry logBuffer[MAX_LOG_ENTRIES];
 int logHead = 0;
 int logCount = 0;
 
+bool saveLogFile() {
+  File file = SPIFFS.open(LOG_FILE, "w");
+  if (!file) return false;
+
+  for (int i = 0; i < logCount; i++) {
+    int idx = (logHead + MAX_LOG_ENTRIES - logCount + i) % MAX_LOG_ENTRIES;
+    file.printf("%s,%.1f,%.1f,%.1f", logBuffer[idx].timestamp,
+                logBuffer[idx].temp, logBuffer[idx].hum,
+                logBuffer[idx].light);
+    for (int j = 0; j < 5; j++) {
+      file.printf(",%.1f,%.1f,%d,%.1f", logBuffer[idx].soilBefore[j],
+                  logBuffer[idx].soilAfter[j], logBuffer[idx].mode[j],
+                  logBuffer[idx].duration[j]);
+    }
+    file.printf(",%d\n", logBuffer[idx].sysMode);
+  }
+
+  file.close();
+  return true;
+}
+
+bool loadLogFile() {
+  if (!SPIFFS.exists(LOG_FILE)) return false;
+
+  File file = SPIFFS.open(LOG_FILE, "r");
+  if (!file) return false;
+
+  logHead = 0;
+  logCount = 0;
+
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    if (line.length() < 5) continue;
+
+    char buf[256];
+    line.toCharArray(buf, sizeof(buf));
+    char *token = strtok(buf, ",");
+    if (!token) continue;
+
+    LogEntry entry;
+    strncpy(entry.timestamp, token, sizeof(entry.timestamp) - 1);
+    entry.timestamp[sizeof(entry.timestamp) - 1] = '\0';
+
+    token = strtok(NULL, ",");
+    if (!token) continue;
+    entry.temp = atof(token);
+    token = strtok(NULL, ",");
+    entry.hum = atof(token);
+    token = strtok(NULL, ",");
+    entry.light = atof(token);
+
+    for (int j = 0; j < 5; j++) {
+      token = strtok(NULL, ",");
+      entry.soilBefore[j] = token ? atof(token) : 0.0;
+      token = strtok(NULL, ",");
+      entry.soilAfter[j] = token ? atof(token) : 0.0;
+      token = strtok(NULL, ",");
+      entry.mode[j] = token ? atoi(token) : 0;
+      token = strtok(NULL, ",");
+      entry.duration[j] = token ? atof(token) : 0.0;
+    }
+
+    token = strtok(NULL, ",");
+    entry.sysMode = token ? atoi(token) : 0;
+
+    logBuffer[logHead] = entry;
+    logHead = (logHead + 1) % MAX_LOG_ENTRIES;
+    if (logCount < MAX_LOG_ENTRIES) logCount++;
+  }
+
+  file.close();
+  return true;
+}
+
 void addLogEntry() {
   DateTime now = rtc.now();
   sprintf(logBuffer[logHead].timestamp, "%04d/%02d/%02d %02d:%02d:%02d",
@@ -165,6 +242,8 @@ void addLogEntry() {
   logHead = (logHead + 1) % MAX_LOG_ENTRIES;
   if (logCount < MAX_LOG_ENTRIES)
     logCount++;
+
+  saveLogFile();
 }
 
 // ==========================================
@@ -181,11 +260,10 @@ float fungsiMax(float a, float b) { return (a > b) ? a : b; }
 
 // ==========================================
 // INPUT 1: KELEMBABAN TANAH (%)
-// NOTE: nilai sensor kelembaban dari nilai Regresi Linear (ADC) yang sudah di-mapping ke 0-100%
-// (ADC kecil = basah, ADC besar = kering).
-// 0% = kering, 100% = basah
-// "basah/kering" ditangani di dalam fungsi keanggotaan,
-// bukan di mapping ADC -> lihat SensorTask.
+// NOTE: nilai sensor kelembaban dari nilai Regresi Linear (ADC) yang sudah
+// di-mapping ke 0-100% (ADC kecil = basah, ADC besar = kering). 0% = kering,
+// 100% = basah "basah/kering" ditangani di dalam fungsi keanggotaan, bukan di
+// mapping ADC -> lihat SensorTask.
 // ==========================================
 // ==========================================
 // FUNGSI KEANGGOTAAN FUZZY (BERDASARKAN Y)
@@ -428,6 +506,24 @@ void handleRoot() { serveSpiffs("/index.html", "text/html"); }
 
 void handleCSS() { serveSpiffs("/style.css", "text/css"); }
 
+void handleSyncTime() {
+  if (server.hasArg("y") && server.hasArg("m") && server.hasArg("d") && 
+      server.hasArg("h") && server.hasArg("min") && server.hasArg("s")) {
+    int y = server.arg("y").toInt();
+    int m = server.arg("m").toInt();
+    int d = server.arg("d").toInt();
+    int h = server.arg("h").toInt();
+    int min = server.arg("min").toInt();
+    int s = server.arg("s").toInt();
+    if (rtcAvailable) {
+      rtc.adjust(DateTime(y, m, d, h, min, s));
+    }
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Bad Request");
+  }
+}
+
 void handleData() {
   JsonDocument doc;
   doc["temperature"] = temperature;
@@ -435,6 +531,16 @@ void handleData() {
   doc["lightLevel"] = lightLevel;
   doc["systemMode"] = systemMode;
   doc["relayMain"] = manualRelayMain;
+
+  if (rtcAvailable) {
+    DateTime now = rtc.now();
+    char rtcStr[20];
+    sprintf(rtcStr, "%04d/%02d/%02d %02d:%02d:%02d",
+            now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+    doc["rtcTime"] = rtcStr;
+  } else {
+    doc["rtcTime"] = "RTC Error";
+  }
 
   JsonArray arr = doc["zona"].to<JsonArray>();
   if (xSemaphoreTake(zonaMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -531,6 +637,8 @@ void handleConfigGet() {
   doc["sensorInterval"] = cfgSensorInterval;
   doc["manualMode"] = cfgManualMode;
   doc["manualDur"] = cfgManualDur;
+  doc["logInterval"] = cfgLogInterval;
+  doc["cooldown"] = cfgCooldown;
 
   String response;
   serializeJson(doc, response);
@@ -548,6 +656,10 @@ void handleConfigPost() {
         cfgManualMode = doc["manualMode"];
       if (doc["manualDur"].is<uint32_t>())
         cfgManualDur = doc["manualDur"];
+      if (doc["logInterval"].is<uint32_t>())
+        cfgLogInterval = doc["logInterval"];
+      if (doc["cooldown"].is<uint32_t>())
+        cfgCooldown = doc["cooldown"];
       server.send(200, "text/plain", "OK");
       return;
     }
@@ -701,10 +813,10 @@ void SensorTask(void *pv) {
 
         // 3. Batasi nilai agar tetap di rentang 0 - 100
         zona[i].soil = constrain(mappedSoil, 0.0f, 100.0f);
-        
+
         // Simpan nilai soilBefore jika zona sedang tidak aktif
         if (zona[i].mode == 0 && !manualRelayState[i]) {
-            zona[i].soilBefore = zona[i].soil;
+          zona[i].soilBefore = zona[i].soil;
         }
       }
       xSemaphoreGive(zonaMutex);
@@ -722,8 +834,8 @@ void SensorTask(void *pv) {
     static uint32_t lastHourlyLog = 0;
     uint32_t currentSec = getCurrentTimeSeconds();
 
-    // Log per jam (3600 detik)
-    if (lastHourlyLog == 0 || (currentSec - lastHourlyLog >= 3600)) {
+    // Log rutin (interval default 3600 detik)
+    if (lastHourlyLog == 0 || (currentSec - lastHourlyLog >= cfgLogInterval)) {
       addLogEntry();
       lastHourlyLog = currentSec;
     }
@@ -755,9 +867,9 @@ void FuzzyTask(void *pv) {
         float durasi =
             prosesFuzzyMamdani(zona[i].soil, temperature, lightLevel);
 
-        // Cek cooldown: Jika belum lewat 4 jam, abaikan hasil fuzzy (set ke 0)
+        // Cek cooldown
         if (lastWateringTime[i] != 0 &&
-            (currentTime - lastWateringTime[i]) < COOLDOWN_SECONDS) {
+            (currentTime - lastWateringTime[i]) < cfgCooldown) {
           durasi = 0;
         }
 
@@ -833,6 +945,20 @@ void IrrigationTask(void *pv) {
       digitalWrite(relayPin[id], RELAY_OFF);
     }
 
+    // Matikan relay utama segera setelah penyiraman selesai
+    portENTER_CRITICAL(&mux);
+    activeIrrigations--;
+    if (activeIrrigations == 0 && systemMode != 1) {
+      digitalWrite(RELAY_MAIN, RELAY_OFF);
+      // digitalWrite(RELAY_POMPA, RELAY_OFF);
+    }
+    portEXIT_CRITICAL(&mux);
+
+    // Kasih jeda agar tanah bisa melakukan penyerapan air
+    // sehingga pembacaan mois sesudah (soilAfter) lebih akurat.
+    // Jeda diset 15 detik (15000 ms), bisa disesuaikan kebutuhan.
+    vTaskDelay(pdMS_TO_TICKS(15000));
+
     addLogEntry();
 
     // Catat waktu selesai penyiraman untuk cooldown
@@ -844,14 +970,6 @@ void IrrigationTask(void *pv) {
       zona[id].duration = 0;
       xSemaphoreGive(zonaMutex);
     }
-
-    portENTER_CRITICAL(&mux);
-    activeIrrigations--;
-    if (activeIrrigations == 0 && systemMode != 1) {
-      digitalWrite(RELAY_MAIN, RELAY_OFF);
-      // digitalWrite(RELAY_POMPA, RELAY_OFF);
-    }
-    portEXIT_CRITICAL(&mux);
 
     xSemaphoreGive(maxConcurrentIrrigationSemaphore);
   }
@@ -872,6 +990,7 @@ void WebTask(void *pv) {
   server.on("/api/schedule", HTTP_GET, handleScheduleGet);
   server.on("/api/schedule", HTTP_POST, handleSchedulePost);
   server.on("/api/log", HTTP_GET, handleLogGet);
+  server.on("/api/sync-time", HTTP_POST, handleSyncTime);
 
   server.begin();
 
@@ -1026,6 +1145,9 @@ void setup() {
 
   // Load jadwal dari SPIFFS
   loadSchedule();
+
+  // Load log persisten dari SPIFFS
+  loadLogFile();
 
   Serial.println("Smart Nursery Siap");
 }
