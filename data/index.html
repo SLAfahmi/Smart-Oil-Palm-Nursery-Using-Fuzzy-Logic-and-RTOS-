@@ -410,7 +410,7 @@
     </div>
 
     <!-- Export CSV -->
-    <div class="config-item" style="margin-bottom:2rem;">
+    <div class="config-item" style="margin-bottom:1rem;">
         <div class="config-item-header">
             <div class="config-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -434,6 +434,24 @@
             </svg>
             Export CSV
         </button>
+    </div>
+
+    <!-- Hapus Log Data -->
+    <div class="config-item" style="margin-bottom:2rem;">
+        <div class="config-item-header">
+            <div class="config-icon" style="color:red;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+            </div>
+            <div>
+                <div class="form-label" style="margin-bottom:0; color:red;">Hapus Data Log</div>
+                <div class="form-hint" style="margin:0;">Menghapus semua riwayat log (permanen)</div>
+            </div>
+        </div>
+        <button class="btn btn-secondary" onclick="resetLogData()" style="padding:0.5rem 1.25rem; white-space:nowrap; border-color:red; color:red;">Hapus Log</button>
     </div>
 
 </div><!-- /tab-config -->
@@ -926,6 +944,16 @@
                 document.body.removeChild(link);
             })
             .catch(e => { console.error(e); alert("Gagal mengambil atau memproses data log."); });
+    }
+
+    function resetLogData() {
+        if (!confirm('Apakah Anda yakin ingin menghapus semua data log? Tindakan ini tidak dapat dibatalkan.')) return;
+        fetch('/api/log/reset', { method: 'POST' })
+            .then(r => {
+                if (r.ok) alert("Data log berhasil dihapus!");
+                else alert("Gagal menghapus data log.");
+            })
+            .catch(e => { console.error(e); alert("Terjadi kesalahan saat menghapus data log."); });
     }
 
     // ============ INIT ============

@@ -789,6 +789,15 @@ void handleLogGet() {
   server.send(200, "application/json", response);
 }
 
+void handleLogReset() {
+  logHead = 0;
+  logCount = 0;
+  if (SPIFFS.exists(LOG_FILE)) {
+    SPIFFS.remove(LOG_FILE);
+  }
+  server.send(200, "text/plain", "OK");
+}
+
 // ==========================================
 // SENSOR TASK
 // ==========================================
@@ -990,6 +999,7 @@ void WebTask(void *pv) {
   server.on("/api/schedule", HTTP_GET, handleScheduleGet);
   server.on("/api/schedule", HTTP_POST, handleSchedulePost);
   server.on("/api/log", HTTP_GET, handleLogGet);
+  server.on("/api/log/reset", HTTP_POST, handleLogReset);
   server.on("/api/sync-time", HTTP_POST, handleSyncTime);
 
   server.begin();
